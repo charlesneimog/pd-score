@@ -3,20 +3,55 @@ local slaxml = require("slaxml")
 local json = require("json")
 local score = pd.Class:new():register("l.score")
 
-local glyphs = nil
-local glyphnames = nil
-local font = nil
+local bravura_glyphs = nil
+local bravura_glyphnames = nil
+local bravura_font = nil
+
+-- just to debug and understand
+local notes = {
+	whole = {
+		space = 200,
+		head = "noteheadWhole",
+		stem = nil,
+		flag = nil,
+	},
+	half = {
+		space = 100,
+		head = "noteheadHalf",
+		stem = true,
+		flag = nil,
+	},
+	quarter = {
+		space = 50,
+		head = "noteheadBlack",
+		stem = true,
+		flag = nil,
+	},
+	eighth = {
+		space = 25,
+		head = "noteheadBlack",
+		stem = true,
+		flag = { "flag8thUp", "flag8thDown" },
+	},
+}
 
 -- ─────────────────────────────────────
 function score:initialize(_, _)
 	self.inlets = 1
 
-	-- graphics
+	-- remove after
+	if not bravura_glyphnames then
+		self:readGlyphNames()
+	end
+	if not bravura_glyphs or not bravura_font then
+		self:readFont()
+	end
+
+	-- sizes linked to this canvas size for now
 	self:set_size(1024, 512)
 	self.scale = 0
 	self.x, self.y = self:get_size()
-	self:readFont()
-	self:readGlyphNames()
+	self.last_note = 0
 
 	return true
 end
@@ -33,7 +68,7 @@ end
 
 -- ─────────────────────────────────────
 function score:readGlyphNames()
-	if glyphnames then
+	if bravura_glyphnames then
 		return
 	end
 
@@ -49,15 +84,16 @@ function score:readGlyphNames()
 		self:error("[readsvg] Error to read glyphnames!")
 		return
 	end
-	glyphnames = json.decode(glyphJson)
+	bravura_glyphnames = json.decode(glyphJson)
 end
 
 -- ─────────────────────────────────────
 function score:readFont()
-	if glyphs then
+	if bravura_glyphs and bravura_font then
 		return
 	end
-	glyphs = {}
+	bravura_glyphs = {}
+	bravura_font = {}
 	local svgfile = score._loadpath .. "/Bravura.svg"
 	local f = io.open(svgfile, "r")
 	if f == nil then
@@ -119,8 +155,8 @@ function score:readFont()
 	})
 
 	parser:parse(xml, { stripWhitespace = true })
-	glyphs = loaded_glyphs
-	font = loaded_font
+	bravura_glyphs = loaded_glyphs
+	bravura_font = loaded_font
 end
 
 -- ─────────────────────────────────────
@@ -154,16 +190,9 @@ end
 
 -- ──────────────────────────────────────────
 function score:getGlyph(name)
-	if not glyphnames then
-		self:readGlyphNames()
-	end
-	if not glyphs then
-		self:readFont()
-	end
-
-	local codepoint = glyphnames[name].codepoint
+	local codepoint = bravura_glyphnames[name].codepoint
 	codepoint = codepoint:gsub("U%+", "uni")
-	return glyphs[codepoint]
+	return bravura_glyphs[codepoint]
 end
 
 -- ──────────────────────────────────────────
@@ -171,27 +200,63 @@ function score:paint(g)
 	g:set_color(0)
 	g:fill_all()
 	self.x_size, self.y_size = self:get_size()
+	self.staff_y_pos = -self.y_size / 1.5
 
-	local bbox_left, bbox_bottom, bbox_right, bbox_top = -434, -1992, 2319, 1951
+	local bbox_left, bbox_bottom, bbox_right, bbox_top = table.unpack(bravura_font.bbox)
 	local bbox_width = bbox_right - bbox_left
 	local bbox_height = bbox_top - bbox_bottom
 	local scale_x = self.x_size / bbox_width
 	local scale_y = self.y_size / bbox_height
 	self.scale = math.min(scale_x, scale_y)
-	g:scale(1, -1)
-	g:translate(50, -self.y_size / 2.5)
+	self:create_staff(g)
+	self:create_clef(g)
 
-	local lG = self:getGlyph("gClef8vbCClef")
+	self:create_addnote(g, "half", 60)
+end
+
+-- ─────────────────────────────────────
+function score:create_addnote(g, id, pitch)
+	g:reset_transform()
+	g:scale(1, -1)
+	g:translate(50 + self.last_note, self.staff_y_pos)
+	local note = notes[id]
+
+	--
+	local lG = self:getGlyph(note.head)
+	local lGAdv = lG["horizAdvX"]
 	score:draw_glyph(g, lG, self.scale)
-	-- self:create_staff(g)
+	self.last_note = 100 + self.last_note
+
+	if note.stem then
+		local stem = self:getGlyph("stem")
+		local lGAdv = lG["horizAdvX"]
+		g:translate(lGAdv * self.scale, 0)
+
+		score:draw_glyph(g, stem, self.scale)
+	end
+	if note.flag then
+		local flag = self:getGlyph(note.flag[1])
+		self:create_addflag(g, flag)
+	end
+	g:reset_transform()
+end
+
+-- ─────────────────────────────────────
+function score:create_clef(g)
+	g:reset_transform()
+	g:scale(1, -1)
+	g:translate(10, self.staff_y_pos)
+	local lG = self:getGlyph("gClef")
+	score:draw_glyph(g, lG, self.scale)
+	self.last_note = lG["horizAdvX"] * self.scale
+	g:reset_transform()
 end
 
 -- ─────────────────────────────────────
 function score:create_staff(g)
 	g:reset_transform()
 	g:scale(1, -1)
-
-	g:translate(0, -self.y_size / 2.5)
+	g:translate(0, self.staff_y_pos)
 	local score_g = self:getGlyph("staff5LinesNarrow")
 	if not score_g then
 		self:error("Glyph not found")
@@ -216,6 +281,7 @@ function score:create_staff(g)
 		g:translate(x, 0)
 		self:draw_glyph(g, score_g, self.scale)
 	end
+	g:reset_transform()
 end
 
 -- ─────────────────────────────────────
@@ -225,13 +291,12 @@ function score:draw_glyph(g, glyph, scaling)
 	local last_control_x, last_control_y = nil, nil -- For the previous cubic bezier control point
 	g:set_color(1)
 	local p = Path(0, 0) -- Start with a new Path
-
 	for _, v in pairs(command) do
 		local cmd = v[1]
 		local params = v[2]
 		if cmd == "M" then
 			x, y = params[1] * scaling, params[2] * scaling
-			-- should be a move_to
+			-- should be move_to
 			p:line_to(x, y)
 		elseif cmd == "h" then
 			x = x + params[1] * scaling
