@@ -1,18 +1,63 @@
 -- Include required libraries
 local slaxml = require("slaxml")
+local json = require("json")
 local score = pd.Class:new():register("l.score")
 
--- Initialize the score object
-function score:initialize(_, argv)
+local glyphs = nil
+local glyphnames = nil
+local font = nil
+
+-- ─────────────────────────────────────
+function score:initialize(_, _)
 	self.inlets = 1
-	self:set_size(127, 64)
+
+	-- graphics
+	self:set_size(1024, 512)
+	self.scale = 0
+	self.x, self.y = self:get_size()
 	self:readFont()
+	self:readGlyphNames()
+
 	return true
 end
 
--- Read the SVG font file
+-- ─────────────────────────────────────
+function score:split(string, delimiter)
+	local result = {}
+	local pattern = string.format("([^%s]+)", delimiter)
+	for match in string:gmatch(pattern) do
+		table.insert(result, match)
+	end
+	return result
+end
+
+-- ─────────────────────────────────────
+function score:readGlyphNames()
+	if glyphnames then
+		return
+	end
+
+	local glyphName = score._loadpath .. "/glyphnames.json"
+	local f = io.open(glyphName, "r")
+	if f == nil then
+		self:error("[l.score] Failed to open file!")
+		return
+	end
+	local glyphJson = f:read("*all")
+	local ok = f:close()
+	if not ok then
+		self:error("[readsvg] Error to read glyphnames!")
+		return
+	end
+	glyphnames = json.decode(glyphJson)
+end
+
+-- ─────────────────────────────────────
 function score:readFont()
-	self.glyphs = {}
+	if glyphs then
+		return
+	end
+	glyphs = {}
 	local svgfile = score._loadpath .. "/Bravura.svg"
 	local f = io.open(svgfile, "r")
 	if f == nil then
@@ -27,42 +72,65 @@ function score:readFont()
 		return
 	end
 
-	local glyphs = {}
+	local loaded_glyphs = {}
 	local currentName = ""
 	local currentD = ""
 	local currentHorizAdvX = ""
+
+	local loaded_font = {}
+	local font_field = {
+		"family",
+		"weight",
+		"stretch",
+		"units_per_em",
+		"panose",
+		"ascent",
+		"descent",
+		"bbox",
+		"underline_thickness",
+		"underline_position",
+		"stemh",
+		"stemv",
+		"unicode_range",
+	}
+
 	local parser = slaxml:parser({
 		attribute = function(name, value, _, _)
+			-- glyph
 			if name == "glyph-name" then
 				currentName = value
 			elseif name == "d" then
 				currentD = value
 			elseif name == "horiz-adv-x" then
 				currentHorizAdvX = value
-			else
-				pd.post("[l.score] Unknown attribute: " .. name)
+			end
+
+			for _, field in ipairs(font_field) do
+				if name == field then
+					loaded_font[field] = score:split(value, " ")
+				end
 			end
 		end,
 		closeElement = function(name, _)
 			if name == "glyph" then
-				glyphs[currentName] = { d = currentD, horizAdvX = currentHorizAdvX }
-			else
-				pd.post("[l.score] Unknown element: " .. name)
+				loaded_glyphs[currentName] = { d = currentD, horizAdvX = currentHorizAdvX }
 			end
 		end,
 	})
 
 	parser:parse(xml, { stripWhitespace = true })
-	self.glyphs = glyphs
+	glyphs = loaded_glyphs
+	font = loaded_font
 end
 
--- Reload the score object
+-- ─────────────────────────────────────
 function score:in_1_reload()
 	self:dofilex(self._scriptname)
+	self:initialize()
 	self:repaint()
 end
 
--- Parse the SVG path data
+-- ─────────────────────────────────────
 function score:parse_svg_path(d)
 	local commands = {}
 	local i = 1
@@ -85,61 +153,111 @@ function score:parse_svg_path(d)
 end
 
 -- ──────────────────────────────────────────
-function score:draw_glyph(g, glyph)
-	local command = self:parse_svg_path(glyph.d)
-	local p
-	local x, y
-	local last_control_x, last_control_y = nil, nil -- For the previous cubic bezier control point
-	local stroke_path = 1
+function score:getGlyph(name)
+	if not glyphnames then
+		self:readGlyphNames()
+	end
+	if not glyphs then
+		self:readFont()
+	end
 
-	-- Iterate through the command list and handle each drawing command
+	local codepoint = glyphnames[name].codepoint
+	codepoint = codepoint:gsub("U%+", "uni")
+	return glyphs[codepoint]
+end
+
+-- ──────────────────────────────────────────
+function score:paint(g)
+	g:set_color(0)
+	g:fill_all()
+	self.x_size, self.y_size = self:get_size()
+
+	local bbox_left, bbox_bottom, bbox_right, bbox_top = -434, -1992, 2319, 1951
+	local bbox_width = bbox_right - bbox_left
+	local bbox_height = bbox_top - bbox_bottom
+	local scale_x = self.x_size / bbox_width
+	local scale_y = self.y_size / bbox_height
+	self.scale = math.min(scale_x, scale_y)
+	g:scale(1, -1)
+	g:translate(50, -self.y_size / 2.5)
+
+	local lG = self:getGlyph("gClef8vbCClef")
+	score:draw_glyph(g, lG, self.scale)
+	-- self:create_staff(g)
+end
+
+-- ─────────────────────────────────────
+function score:create_staff(g)
+	g:reset_transform()
+	g:scale(1, -1)
+
+	g:translate(0, -self.y_size / 2.5)
+	local score_g = self:getGlyph("staff5LinesNarrow")
+	if not score_g then
+		self:error("Glyph not found")
+		return
+	end
+
+	local adv = score_g["horizAdvX"]
+	g:translate(0, 0)
+	self:draw_glyph(g, score_g, self.scale)
+
+	local x = adv * self.scale
+	local maxIter = self.x_size / x
+	maxIter = math.ceil(maxIter) - 1
+	local x_trans = x * (maxIter + 1)
+	for i = 1, maxIter do
+		g:translate(x, 0)
+		self:draw_glyph(g, score_g, self.scale)
+	end
+
+	g:translate(-x_trans, -30)
+	for i = 1, maxIter + 1 do
+		g:translate(x, 0)
+		self:draw_glyph(g, score_g, self.scale)
+	end
+end
+
+-- ─────────────────────────────────────
+function score:draw_glyph(g, glyph, scaling)
+	local command = self:parse_svg_path(glyph.d)
+	local x, y = 0, 0
+	local last_control_x, last_control_y = nil, nil -- For the previous cubic bezier control point
+	g:set_color(1)
+	local p = Path(0, 0) -- Start with a new Path
+
 	for _, v in pairs(command) do
 		local cmd = v[1]
 		local params = v[2]
 		if cmd == "M" then
-			p = Path(params[1], params[2])
-			x, y = params[1], params[2]
-			last_control_x, last_control_y = nil, nil -- Reset control point for new path
+			x, y = params[1] * scaling, params[2] * scaling
+			-- should be a move_to
+			p:line_to(x, y)
 		elseif cmd == "h" then
-			x = x + params[1]
+			x = x + params[1] * scaling
 			p:line_to(x, y)
 		elseif cmd == "l" then
-			-- Relative line command
-			x = x + params[1]
-			y = y + params[2]
+			x = x + params[1] * scaling
+			y = y + params[2] * scaling
 			p:line_to(x, y)
 		elseif cmd == "v" then
-			-- The vertical displacement (relative)
-			local dy = params[1]
-			y = y + dy
+			y = y + params[1] * scaling
 			p:line_to(x, y)
 		elseif cmd == "c" then
-			-- Relative cubic Bezier curve
-			local cx1 = params[1]
-			local cy1 = params[2]
-			local cx2 = params[3]
-			local cy2 = params[4]
-			local x3 = params[5]
-			local y3 = params[6]
-
-			-- Convert relative coordinates to absolute coordinates
-			local control_x1 = x + cx1
-			local control_y1 = y + cy1
-			local control_x2 = x + cx2
-			local control_y2 = y + cy2
-			local end_x = x + x3
-			local end_y = y + y3
-
-			-- Call the cubic_to function with the absolute coordinates
-			p:cubic_to(control_x1, control_y1, control_x2, control_y2, end_x, end_y)
-			x, y = end_x, end_y
-			last_control_x, last_control_y = control_x2, control_y2
+			local cx1 = params[1] * scaling
+			local cy1 = params[2] * scaling
+			local cx2 = params[3] * scaling
+			local cy2 = params[4] * scaling
+			local x3 = params[5] * scaling
+			local y3 = params[6] * scaling
+			p:cubic_to(x + cx1, y + cy1, x + cx2, y + cy2, x + x3, y + y3)
+			x, y = x + x3, y + y3
+			last_control_x, last_control_y = x + cx2, y + cy2
 		elseif cmd == "s" then
-			-- Smooth cubic Bezier curve (relative)
-			local dx2 = params[1]
-			local dy2 = params[2]
-			local dx = params[3]
-			local dy = params[4]
+			local dx2 = params[1] * scaling
+			local dy2 = params[2] * scaling
+			local dx = params[3] * scaling
+			local dy = params[4] * scaling
 			local control_x1, control_y1
 			if last_control_x and last_control_y then
 				control_x1 = x + (x - last_control_x)
@@ -148,57 +266,16 @@ function score:draw_glyph(g, glyph)
 				control_x1 = x
 				control_y1 = y
 			end
-			local control_x2 = x + dx2
-			local control_y2 = y + dy2
-			local end_x = x + dx
-			local end_y = y + dy
-			p:cubic_to(control_x1, control_y1, control_x2, control_y2, end_x, end_y)
-			x, y = end_x, end_y
-			last_control_x, last_control_y = control_x2, control_y2
+			p:cubic_to(control_x1, control_y1, x + dx2, y + dy2, x + dx, y + dy)
+			x, y = x + dx, y + dy
+			last_control_x, last_control_y = x + dx2, y + dy2
 		elseif cmd == "z" then
-			g:set_color(0)
 			p:close()
-			g:fill_path(p)
 		else
-			self.error(cmd .. " " .. table.concat(params, " "))
+			self:error(cmd .. " " .. table.concat(params, " "))
 		end
 	end
-end
 
---╭─────────────────────────────────────╮
---│        Draw the SVG commands        │
---╰─────────────────────────────────────╯
-function score:paint(g)
-	g:set_color(0)
-	g:fill_all()
-	-- size_x, size_y = g:get_size()
-
-	local value = {
-		"E050",
-	}
-	local glyph = self.glyphs["uni" .. value[1]]
-	local canvas_size = 127
-	local bbox_left, bbox_bottom, bbox_right, bbox_top = -434, -1992, 2319, 1951
-	local bbox_width = bbox_right - bbox_left
-	local bbox_height = bbox_top - bbox_bottom
-	local scale_x = canvas_size / bbox_width
-	local scale_y = canvas_size / bbox_height
-	local scale = math.min(scale_x, scale_y)
-	local offset_x = (canvas_size - bbox_width * scale) / 2 - bbox_left * scale
-	local canvas_center_y = canvas_size / 2
-	local bbox_center_y = (bbox_top + bbox_bottom) / 2
-	local offset_y = canvas_center_y - bbox_center_y * scale
-	g:scale(scale, -scale) -- Scale the glyph
-
-	local pos_y = -2319 / 2
-	local pos_x = 0 --1992 / 2
-	g:translate(offset_x + pos_x, offset_y + pos_y) -- Translate with (pos_x, pos_y)
-	self:draw_glyph(g, glyph)
-
-	-- pos_x = 350
-	-- pos_y = -65
-	-- for i = 1, 8 do
-	-- 	g:translate(offset_x + pos_x, offset_y + pos_y) -- Translate with (pos_x, pos_y)
-	-- 	self:draw_glyph(g, glyph, pos_x, pos_y)
-	-- end
+	g:set_color(1)
+	g:fill_path(p)
 end
