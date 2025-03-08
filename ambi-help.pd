@@ -1,0 +1,6 @@
+#N canvas 963 23 951 1016 10;
+#X declare -lib neimog;
+#X obj 3 6 declare -lib neimog;
+#X obj 51 81 ambi;
+#X msg 51 49 reload;
+#X connect 2 0 1 0;
